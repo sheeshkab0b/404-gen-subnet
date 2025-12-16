@@ -37,8 +37,8 @@ async def run_manage_round_iteration() -> None:
         logger.debug(f"Previous round schedule: {schedule}")
 
         current_block = await bt.async_subtensor(network=settings.network).get_current_block()
-        next_round_start, next_round_start_block = get_next_round_start(
-            current_time=datetime.now(UTC), current_block=current_block, config=config
+        next_round_start, next_round_start_block = await _get_next_round_start(
+            current_time=datetime.now(UTC), current_block=current_block, config=config, previous_round_schedule=schedule
         )
 
         # Check if the competition has ended
@@ -80,22 +80,36 @@ async def run_manage_round_iteration() -> None:
         )
 
 
-def get_next_round_start(
+async def _get_next_round_start(
     current_time: datetime,
     current_block: int,
     config: CompetitionConfig,
+    previous_round_schedule: RoundSchedule | None,
 ) -> tuple[datetime, int]:
     """
     Calculate the next round start datetime and block.
     """
-    today = current_time.date()
-    today_round = datetime.combine(today, config.round_start_time, tzinfo=UTC)
+    previous_round_start: datetime | None = None
+    block_timestamp: datetime | None = None
+    if previous_round_schedule:
+        block_timestamp = await bt.async_subtensor(network=settings.network).get_timestamp(
+            block=previous_round_schedule.earliest_reveal_block
+        )
+        previous_round_start = block_timestamp
+
+    if previous_round_start is not None:
+        next_round_start_time = previous_round_start + timedelta(days=config.round_duration_days)
+    else:
+        next_round_start_time = current_time
+
+    next_round_start_date = next_round_start_time.date()
+    today_round = datetime.combine(next_round_start_date, config.round_start_time, tzinfo=UTC)
 
     # Determine candidate round start
     if current_time < today_round:
         next_round = today_round
     else:
-        next_round = today_round + timedelta(days=1)
+        next_round = today_round + timedelta(days=config.round_duration_days)
 
     # Skip day if FINALIZING with insufficient buffer
     time_remaining = next_round - current_time
@@ -106,6 +120,20 @@ def get_next_round_start(
     first_round = datetime.combine(config.first_evaluation_date, config.round_start_time, tzinfo=UTC)
     if next_round < first_round:
         next_round = first_round
+
+    # Log all calculation details
+    prev_block_info = (
+        f"block {previous_round_schedule.earliest_reveal_block} ({block_timestamp})"
+        if previous_round_schedule
+        else "N/A"
+    )
+    logger.trace(
+        f"Previous round start: {previous_round_start} ({prev_block_info}), "
+        f"next_round_start_time: {next_round_start_time}, "
+        f"next_round_start_date: {next_round_start_date}, "
+        f"today_round: {today_round}, "
+        f"next_round: {next_round}"
+    )
 
     # Calculate block
     seconds_until = (next_round - current_time).total_seconds()
